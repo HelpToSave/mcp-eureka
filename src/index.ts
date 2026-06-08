@@ -161,28 +161,99 @@ function trimDate(v: string | undefined): string | undefined {
 }
 
 function decodeEntities(s: string): string {
+    const named: Record<string, string> = {
+        "&nbsp;": " ",
+        "&amp;": "&",
+        "&lt;": "<",
+        "&gt;": ">",
+        "&quot;": '"',
+        "&apos;": "'",
+        "&sect;": "§",
+        "&middot;": "·",
+        "&bull;": "•",
+        "&ndash;": "–",
+        "&mdash;": "—",
+        "&hellip;": "…",
+        "&laquo;": "«",
+        "&raquo;": "»",
+        "&bdquo;": "„",
+        "&ldquo;": "“",
+        "&rdquo;": "”",
+        "&sbquo;": "‚",
+        "&lsquo;": "‘",
+        "&rsquo;": "’",
+        "&deg;": "°",
+        "&times;": "×",
+        "&divide;": "÷",
+        "&euro;": "€",
+        "&copy;": "©",
+        "&reg;": "®",
+    };
     return s
-        .replace(/&nbsp;/g, " ")
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
+        .replace(/&[a-zA-Z]+;/g, (m) => named[m] ?? m)
         .replace(/&#(\d+);/g, (_m, n) => String.fromCharCode(parseInt(n, 10)))
         .replace(/&#x([0-9a-fA-F]+);/g, (_m, n) =>
             String.fromCharCode(parseInt(n, 16)),
-        );
+        )
+        .replace(/\u00A0/g, " ");
 }
 
+// Usuwa HTML i zamienia bloki na sensowne lamania. Wynik bywa "porozrywany"
+// (kazda wizualna linia zrodla to osobny <br>), dlatego nastepnie przepuszczamy
+// go przez reflowText(), ktory sklei zawijane wiersze w plynne akapity.
 function stripHtml(s: string): string {
-    return decodeEntities(
-        s
-            .replace(/<\s*(br|\/p|\/div|\/tr|\/li|\/h[1-6])\s*>/gi, "\n")
-            .replace(/<[^>]+>/g, " "),
-    )
+    const t = s
+        .replace(/<\s*(script|style)[^>]*>[\s\S]*?<\/\s*\1\s*>/gi, "")
+        .replace(/<\s*br\s*\/?\s*>/gi, "\n")
+        .replace(/<\s*li[^>]*>/gi, "\n• ")
+        .replace(
+            /<\s*\/\s*(p|div|tr|li|ul|ol|h[1-6]|table|blockquote)\s*>/gi,
+            "\n\n",
+        )
+        .replace(/<[^>]+>/g, " ");
+    return decodeEntities(t)
         .replace(/[ \t]+/g, " ")
+        .replace(/ *\n */g, "\n")
         .replace(/\n{3,}/g, "\n\n")
-        .replace(/[ \t]*\n[ \t]*/g, "\n")
+        .trim();
+}
+
+// Skleja "porozrywane" wiersze w plynne akapity. W obrebie bloku (tekst oddzielony
+// pusta linia) laczy zawijane wiersze spacja, ale: zaczyna nowy wiersz przed
+// wypunktowaniem (1) / a) / - / § / art. / ust. / pkt / lit.) oraz lamie po
+// dwukropku (zwykle wprowadza liste). Akapity rozdzielone pusta linia.
+function reflowText(text: string): string {
+    const norm = text.replace(/\r\n?/g, "\n");
+    const blocks = norm.split(/\n{2,}/);
+    const listRe =
+        /^(\d+[.)]\s|[a-zA-Z]\)\s|[-–•*]\s|§\s?\d|art\.\s|ust\.\s|pkt\s|lit\.\s)/;
+    const out: string[] = [];
+    for (const block of blocks) {
+        const lines = block
+            .split("\n")
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0);
+        if (lines.length === 0) continue;
+        const paras: string[] = [];
+        let cur = "";
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (cur === "") cur = line;
+            else if (listRe.test(line)) {
+                paras.push(cur);
+                cur = line;
+            } else cur += " " + line;
+            if (/:$/.test(line) && i < lines.length - 1) {
+                paras.push(cur);
+                cur = "";
+            }
+        }
+        if (cur) paras.push(cur);
+        out.push(paras.join("\n"));
+    }
+    return out
+        .join("\n\n")
+        .replace(/[ \t]{2,}/g, " ")
         .trim();
 }
 
@@ -285,7 +356,7 @@ async function eurekaGetInterpretation(id: string): Promise<Interpretation> {
         dataWydania: trimDate(asText(map.get("DT_WYD"))),
         dataPublikacji: trimDate(asText(map.get("DATA_PUBLIKACJI"))),
         teza: asText(map.get("TEZA")),
-        tresc: trescRaw ? stripHtml(trescRaw) : undefined,
+        tresc: trescRaw ? reflowText(stripHtml(trescRaw)) : undefined,
     };
 }
 

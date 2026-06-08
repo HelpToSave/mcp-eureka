@@ -21,7 +21,8 @@ podatek u źródła**. `mcp-eureka` daje Claude'owi dostęp do realnych interpre
   organem, datą wydania i tezą.
 - **`get_interpretation(id)`** — pełna interpretacja po `ID_INFORMACJI`
   (stan faktyczny, stanowisko wnioskodawcy, ocena organu, uzasadnienie),
-  pierwsze 4000 znaków.
+  pierwsze 4000 znaków. Treść jest oczyszczana z HTML i **sklejana w płynne
+  akapity** (`reflowText`) — bez „porozrywanych" pojedynczych wierszy.
 - **`search_by_signature(signature)`** — skrót: szukaj po sygnaturze KIS
   (np. `0115-KDST2-2.4011.218.2026.2.KK`).
 - **`suggest(phrase)`** — podpowiedzi fraz (autocomplete).
@@ -64,6 +65,19 @@ echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"query":"ulga badawczo-rozwojowa koszty kwalifikowane","pageSize":5}}}' \
   | node dist/index.js
+```
+
+## Skrypt pomocniczy: porządkowanie plików `.md`
+
+`scripts/format-md.mjs` skleja „porozrywany" tekst interpretacji zapisany do pliku
+Markdown (każda wizualna linia źródła bywa osobnym łamaniem) w płynne akapity,
+zachowując wypunktowania. Działa **wyłącznie** na sekcji pod nagłówkiem
+`## Pełna treść`; nagłówek z metadanymi pozostaje nietknięty. Bez zależności,
+czysty Node (UTF-8 natywnie).
+
+```bash
+node scripts/format-md.mjs sciezka/do/pliku.md      # jeden plik
+node scripts/format-md.mjs sciezka/do/folderu        # wszystkie .md w folderze
 ```
 
 ## Konfiguracja w Claude Code
