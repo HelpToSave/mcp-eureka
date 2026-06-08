@@ -1,0 +1,41 @@
+{
+  "name": "mcp-eureka",
+  "version": "1.0.0",
+  "description": "MCP server - polskie interpretacje indywidualne (KIS) przez publiczne API EUREKA (eureka.mf.gov.pl)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "mcp",
+    "eureka",
+    "interpretacje-indywidualne",
+    "kis",
+    "podatki",
+    "tax",
+    "poland"
+  ],
+  "author": "Mateusz Bednarski (https://github.com/HelpToSave)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HelpToSave/mcp-eureka.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HelpToSave/mcp-eureka/issues"
+  },
+  "homepage": "https://github.com/HelpToSave/mcp-eureka#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "tsx": "^4.19.3",
+    "@types/node": "^20.14.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
