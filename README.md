@@ -6,9 +6,7 @@ Finansów (`eureka.mf.gov.pl`).
 
 ## Po co
 
-Ani SAOS, ani CBOSA nie udostępniają interpretacji indywidualnych prawa
-podatkowego. A to codzienny materiał doradcy: **ulga B+R, IP Box, VAT, CIT, PIT,
-podatek u źródła**. `mcp-eureka` daje Claude'owi dostęp do realnych interpretacji
+`mcp-eureka` daje Claude'owi dostęp do realnych interpretacji indywidualnych
 — z sygnaturą, tezą, treścią i linkiem — zamiast zgadywania z pamięci.
 
 **Zakres:** tylko interpretacje indywidualne (`KATEGORIA_INFORMACJI = 1`).
@@ -136,8 +134,7 @@ faktycznym. To nie źródło prawa ani linia orzecznicza sensu stricto. Cytuj z 
 
 Architektura (transport stdio, kontrakt `structuredContent.citations`, układ tooli
 i obsługa błędów) wzorowana na **`mcp-nsa`** autorstwa **Wiesława Mazura** — zestawie
-konektorów MateMatic do polskiego orzecznictwa. `mcp-eureka` domyka warstwę krajową
-o interpretacje indywidualne KIS, których ten zestaw nie obejmował.
+konektorów MateMatic do polskiego orzecznictwa.
 
 ## Licencja
 
