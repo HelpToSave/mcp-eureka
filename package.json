@@ -1,12 +1,22 @@
 {
   "name": "mcp-eureka",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "MCP server - polskie interpretacje indywidualne (KIS) przez publiczne API EUREKA (eureka.mf.gov.pl)",
   "main": "dist/index.js",
+  "bin": {
+    "mcp-eureka": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepare": "npm run build",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
+    "test": "npm run test:parse",
+    "test:parse": "node test/parse.mjs",
+    "smoke": "node test/smoke.mjs",
     "format": "node scripts/format-md.mjs"
   },
   "keywords": [

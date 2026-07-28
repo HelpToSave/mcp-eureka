@@ -1,0 +1,22 @@
+{
+  "results": [
+    {
+      "ID_INFORMACJI": "673398",
+      "SYG": "0115-KDIT2.4011.607.2025.1.MM",
+      "TEZA": "Wartość wyżywienia zapewnianego przez pracodawcę w trakcie oddelegowania stanowi przychód ze stosunku pracy w rozumieniu art. 12 ust. 1 ustawy o podatku dochodowym od osób fizycznych, podlegający opodatkowaniu podatkiem dochodowym od osób fizycznych.",
+      "AUTOR": ["Dyrektor Krajowej Informacji Skarbowej"],
+      "DT_WYD": "2025-12-29",
+      "DATA_PUBLIKACJI": "2026-01-08"
+    },
+    {
+      "ID_INFORMACJI": "509263",
+      "SYG": "0111-KDIB1-3.4010.397.2022.2.IZ",
+      "TEZA": "Czy przeniesienie sprzętu geofizycznego wraz ze sprzętem towarzyszącym w celu czasowego świadczenia usług sejsmicznych na terenie Albanii, Gruzji oraz Angoli będzie podlegać opodatkowaniu podatkiem od dochodów z niezrealizowanych zysków.",
+      "AUTOR": ["Dyrektor Krajowej Informacji Skarbowej"],
+      "DT_WYD": "2022-09-16",
+      "DATA_PUBLIKACJI": "2022-10-03"
+    }
+  ],
+  "facetedResults": [],
+  "totalHits": 37
+}

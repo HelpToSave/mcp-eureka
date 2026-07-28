@@ -201,7 +201,7 @@ function decodeEntities(s: string): string {
 // Usuwa HTML i zamienia bloki na sensowne lamania. Wynik bywa "porozrywany"
 // (kazda wizualna linia zrodla to osobny <br>), dlatego nastepnie przepuszczamy
 // go przez reflowText(), ktory sklei zawijane wiersze w plynne akapity.
-function stripHtml(s: string): string {
+export function stripHtml(s: string): string {
     const t = s
         .replace(/<\s*(script|style)[^>]*>[\s\S]*?<\/\s*\1\s*>/gi, "")
         .replace(/<\s*br\s*\/?\s*>/gi, "\n")
@@ -222,7 +222,7 @@ function stripHtml(s: string): string {
 // pusta linia) laczy zawijane wiersze spacja, ale: zaczyna nowy wiersz przed
 // wypunktowaniem (1) / a) / - / § / art. / ust. / pkt / lit.) oraz lamie po
 // dwukropku (zwykle wprowadza liste). Akapity rozdzielone pusta linia.
-function reflowText(text: string): string {
+export function reflowText(text: string): string {
     const norm = text.replace(/\r\n?/g, "\n");
     const blocks = norm.split(/\n{2,}/);
     const listRe =
@@ -258,6 +258,79 @@ function reflowText(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Bezpiecznik na dryf API (sugestia W. Mazura)
+//
+// API EUREKI jest nieoficjalne i moze sie zmienic bez zapowiedzi. Gdy znikna
+// krytyczne pola (ID_INFORMACJI, SYG/TEZA, dokument.fields), lepiej zwrocic
+// jasny blad `api_changed` niz cichy pusty wynik. Sprawdzamy tylko pola
+// KRYTYCZNE - kosmetyczna zmiana kontraktu nie ma wywracac konektora.
+// ---------------------------------------------------------------------------
+
+const API_CHANGED_HINT =
+    "Struktura odpowiedzi API EUREKI odbiega od znanego kontraktu (odtworzonego " +
+    "2026-06) - prawdopodobnie MF przebudowalo system. Zglos to: " +
+    "https://github.com/HelpToSave/mcp-eureka/issues";
+
+// Zwraca opis niezgodnosci albo null, gdy ksztalt odpowiedzi wyszukiwarki OK.
+export function searchDriftError(resp: unknown): string | null {
+    if (typeof resp !== "object" || resp === null) {
+        return "odpowiedz wyszukiwarki nie jest obiektem JSON";
+    }
+    const r = resp as SearchResponse;
+    if (!Array.isArray(r.results)) {
+        return "w odpowiedzi wyszukiwarki brak tablicy 'results'";
+    }
+    if (r.results.length === 0) return null; // pusty wynik to nie dryf
+    if (!r.results.some((row) => row && row["ID_INFORMACJI"] !== undefined)) {
+        return "wyniki wyszukiwarki nie zawieraja pola ID_INFORMACJI";
+    }
+    if (
+        !r.results.some(
+            (row) => row && (row["SYG"] !== undefined || row["TEZA"] !== undefined),
+        )
+    ) {
+        return "wyniki wyszukiwarki nie zawieraja pol SYG/TEZA";
+    }
+    return null;
+}
+
+// Dryf pelnego dokumentu: 200 OK, pola sa, ale zaden ZNANY klucz nie wystepuje.
+// Pusta lista fields to nie dryf (dokument moze nie istniec -> not_found).
+export function detailDriftError(doc: unknown): string | null {
+    if (typeof doc !== "object" || doc === null) {
+        return "odpowiedz dokumentu nie jest obiektem JSON";
+    }
+    const fields = (doc as DocResponse).dokument?.fields;
+    if (!Array.isArray(fields)) return "w dokumencie brak 'dokument.fields'";
+    if (fields.length === 0) return null;
+    const known = new Set([
+        "SYG",
+        "TEZA",
+        "DT_WYD",
+        "DATA_PUBLIKACJI",
+        "TRESC_INTERESARIUSZ",
+    ]);
+    return fields.some((f) => known.has(f.key))
+        ? null
+        : "dokument.fields nie zawiera zadnego ze znanych pol (SYG/TEZA/DT_WYD/TRESC_INTERESARIUSZ)";
+}
+
+// Dryf sugestii: results istnieje, ale pozycje nie maja pola 'suggestion'.
+export function suggestDriftError(resp: unknown): string | null {
+    if (typeof resp !== "object" || resp === null) {
+        return "odpowiedz sugestii nie jest obiektem JSON";
+    }
+    const r = resp as SuggestResponse;
+    if (!Array.isArray(r.results)) {
+        return "w odpowiedzi sugestii brak tablicy 'results'";
+    }
+    if (r.results.length === 0) return null;
+    return r.results.some((x) => typeof x?.suggestion === "string")
+        ? null
+        : "pozycje sugestii nie zawieraja pola 'suggestion'";
+}
+
+// ---------------------------------------------------------------------------
 // Wyszukiwanie
 // ---------------------------------------------------------------------------
 
@@ -267,6 +340,7 @@ interface SearchParams {
     dateFrom?: string;
     dateTo?: string;
     searchInContent?: boolean;
+    fullPhrase?: boolean;
     pageSize?: number;
     pageNumber?: number;
 }
@@ -294,7 +368,7 @@ async function eurekaSearch(p: SearchParams): Promise<SearchResponse> {
     const body = {
         filter,
         columns: SEARCH_COLUMNS,
-        searchInFullPhrase: false,
+        searchInFullPhrase: p.fullPhrase ?? false,
         searchInContent: p.searchInContent ?? false,
         searchInSynonyms: false,
         searchQuery: p.query ?? "",
@@ -339,18 +413,23 @@ interface Interpretation {
     tresc?: string;
 }
 
-async function eurekaGetInterpretation(id: string): Promise<Interpretation> {
+async function eurekaGetDoc(id: string): Promise<{ safe: string; doc: DocResponse }> {
     const safe = id.replace(/[^0-9]/g, "");
     if (!safe) throw new Error("invalid id");
     const doc = await throttled(() =>
         httpJson<DocResponse>({ method: "GET", path: `/informacje/${safe}` }),
     );
+    return { safe, doc };
+}
+
+// Czysta funkcja parsujaca (bez HTTP) - testowalna offline na fixture'ach.
+export function parseInterpretation(doc: DocResponse, id: string): Interpretation {
     const map = new Map<string, string | string[]>();
     for (const f of doc.dokument?.fields ?? []) map.set(f.key, f.value);
 
     const trescRaw = asText(map.get("TRESC_INTERESARIUSZ")) ?? "";
     return {
-        id: safe,
+        id,
         sygnatura: asText(map.get("SYG")),
         kategoria: doc.nazwa,
         dataWydania: trimDate(asText(map.get("DT_WYD"))),
@@ -368,15 +447,18 @@ interface SuggestResponse {
     results?: { suggestion: string }[];
 }
 
-async function eurekaSuggest(phrase: string): Promise<string[]> {
+async function eurekaSuggest(phrase: string): Promise<SuggestResponse> {
     const enc = encodeURIComponent(phrase);
-    const r = await throttled(() =>
+    return throttled(() =>
         httpJson<SuggestResponse>({
             method: "GET",
             path: `/wyszukiwarka/sugestie/${enc}`,
         }),
     );
-    // Odsiej smieci (np. "," tokeny) - zostaw frazy z min. 3 literami.
+}
+
+// Odsiej smieci (np. "," tokeny) - zostaw frazy z min. 3 literami.
+export function parseSuggestions(r: SuggestResponse): string[] {
     return (r.results ?? [])
         .map((x) => x.suggestion)
         .filter((s) => typeof s === "string" && (s.match(/\p{L}/gu) ?? []).length >= 3);
@@ -396,7 +478,7 @@ interface Citation {
     doc_id: string;
 }
 
-function rowCitation(row: EurekaRow): Citation {
+export function rowCitation(row: EurekaRow): Citation {
     const id = asText(row["ID_INFORMACJI"]) ?? "";
     const sig = asText(row["SYG"]);
     const teza = asText(row["TEZA"]);
@@ -415,7 +497,7 @@ function rowCitation(row: EurekaRow): Citation {
     };
 }
 
-function interpretationCitation(d: Interpretation): Citation {
+export function interpretationCitation(d: Interpretation): Citation {
     return {
         title: d.sygnatura
             ? `Interpretacja indywidualna ${d.sygnatura}`
@@ -432,7 +514,7 @@ function interpretationCitation(d: Interpretation): Citation {
 // Formattery (czlowieko/LLM-czytelne)
 // ---------------------------------------------------------------------------
 
-function formatSearchResults(
+export function formatSearchResults(
     headline: string,
     resp: SearchResponse,
 ): string {
@@ -474,7 +556,9 @@ function formatSearchResults(
     return lines.join("\n");
 }
 
-function formatInterpretation(d: Interpretation): string {
+const TEXT_PREVIEW_CHARS = 4000;
+
+export function formatInterpretation(d: Interpretation): string {
     const lines = [
         "=== INTERPRETACJA INDYWIDUALNA (KIS / EUREKA) ===",
         "",
@@ -487,13 +571,13 @@ function formatInterpretation(d: Interpretation): string {
     if (d.teza) lines.push("", `Teza: ${d.teza}`);
     lines.push("", `URL: ${DOC_UI_URL(d.id)}`);
     if (d.tresc) {
-        const preview = d.tresc.slice(0, 4000);
+        const preview = d.tresc.slice(0, TEXT_PREVIEW_CHARS);
         lines.push(
             "",
-            `--- Tresc (pierwsze 4000 znakow z ${d.tresc.length} lacznie) ---`,
+            `--- Tresc (pierwsze ${Math.min(TEXT_PREVIEW_CHARS, d.tresc.length)} znakow z ${d.tresc.length} lacznie) ---`,
             preview,
         );
-        if (d.tresc.length > 4000) {
+        if (d.tresc.length > TEXT_PREVIEW_CHARS) {
             lines.push(`[...] Skrocono. Pelna tresc: ${DOC_UI_URL(d.id)}`);
         }
     }
@@ -512,7 +596,7 @@ const INSTRUCTIONS = `Ten serwer MCP udostepnia polskie INTERPRETACJE INDYWIDUAL
 1. \`search_by_signature\` - po sygnaturze KIS (np. "0115-KDST2-2.4011.218.2026.2.KK"). Najszybciej.
 
 ### Szerokie szukanie
-2. \`search\` - po slowach kluczowych (query), z opcjonalnym zakresem dat (dateFrom/dateTo, YYYY-MM-DD) i flaga searchInContent (true = szukaj w pelnej tresci, nie tylko w tezie). Zwraca liste z sygnatura, organem, data i teza.
+2. \`search\` - po slowach kluczowych (query), z opcjonalnym zakresem dat (dateFrom/dateTo, YYYY-MM-DD), flaga searchInContent (true = szukaj w pelnej tresci, nie tylko w tezie) i flaga fullPhrase (true = cala fraza dokladnie, np. przepis 'art. 22b ustawy'; domyslnie slowa niezaleznie). Zwraca liste z sygnatura, organem, data i teza.
 3. \`suggest\` - podpowiedzi fraz, gdy zapytanie jest niejednoznaczne.
 
 ### Pelna tresc
@@ -532,6 +616,7 @@ Tool zwraca \`isError: true\` + tekst z prefiksem \`[code]\`:
 - \`missing_arg\` - brak wymaganego argumentu (id / signature / query).
 - \`not_found\` - brak dokumentu/wynikow. Sprobuj innego query lub searchInContent=true.
 - \`upstream_error\` - blad EUREKI (HTTP/timeout). Retry raz przed surface do uzytkownika.
+- \`api_changed\` - struktura odpowiedzi EUREKI odbiega od znanego kontraktu (MF przebudowalo nieoficjalne API). NIE ponawiaj - przekaz uzytkownikowi, ze konektor wymaga aktualizacji.
 
 ## Styl odpowiedzi
 
@@ -580,6 +665,13 @@ const TOOLS = [
                     type: "boolean",
                     description:
                         "true = szukaj w pelnej tresci interpretacji (nie tylko w tezie). Domyslnie false.",
+                },
+                fullPhrase: {
+                    type: "boolean",
+                    description:
+                        "true = cala fraza musi wystapic DOKLADNIE (przydatne dla " +
+                        "przepisow, np. 'art. 22b ustawy'; czesto malo trafien). " +
+                        "Domyslnie false = slowa dopasowywane niezaleznie.",
                 },
                 pageSize: {
                     type: "number",
@@ -657,7 +749,7 @@ const TOOLS = [
 // Setup serwera MCP
 // ---------------------------------------------------------------------------
 
-type ErrorCode = "missing_arg" | "not_found" | "upstream_error";
+type ErrorCode = "missing_arg" | "not_found" | "upstream_error" | "api_changed";
 
 function errorResult(text: string, code: ErrorCode) {
     return {
@@ -668,7 +760,7 @@ function errorResult(text: string, code: ErrorCode) {
 }
 
 const server = new Server(
-    { name: "mcp-eureka", version: "1.0.0" },
+    { name: "mcp-eureka", version: "1.1.0" }, // sync z package.json "version"
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
 );
 
@@ -683,6 +775,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 async function handleSearch(headline: string, params: SearchParams) {
     const resp = await eurekaSearch(params);
+    const drift = searchDriftError(resp);
+    if (drift) return errorResult(`${drift}. ${API_CHANGED_HINT}`, "api_changed");
     return {
         content: [
             { type: "text", text: formatSearchResults(headline, resp) },
@@ -704,7 +798,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 if (!a.query || typeof a.query !== "string") {
                     return errorResult("parametr 'query' jest wymagany.", "missing_arg");
                 }
-                const headline = `Wynik search(query="${a.query}", daty=${a.dateFrom ?? "*"}..${a.dateTo ?? "*"}, wTresci=${a.searchInContent === true}):`;
+                const headline = `Wynik search(query="${a.query}", daty=${a.dateFrom ?? "*"}..${a.dateTo ?? "*"}, wTresci=${a.searchInContent === true}, calaFraza=${a.fullPhrase === true}):`;
                 return await handleSearch(headline, {
                     query: a.query,
                     dateFrom:
@@ -713,6 +807,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     searchInContent:
                         typeof a.searchInContent === "boolean"
                             ? a.searchInContent
+                            : undefined,
+                    fullPhrase:
+                        typeof a.fullPhrase === "boolean"
+                            ? a.fullPhrase
                             : undefined,
                     pageSize:
                         typeof a.pageSize === "number" ? a.pageSize : undefined,
@@ -740,19 +838,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 if (!a.id || typeof a.id !== "string") {
                     return errorResult("parametr 'id' jest wymagany.", "missing_arg");
                 }
-                const d = await eurekaGetInterpretation(a.id);
+                const { safe, doc } = await eurekaGetDoc(a.id);
+                const drift = detailDriftError(doc);
+                if (drift) {
+                    return errorResult(`${drift}. ${API_CHANGED_HINT}`, "api_changed");
+                }
+                const d = parseInterpretation(doc, safe);
                 if (!d.sygnatura && !d.teza && !d.tresc) {
                     return errorResult(
                         `Brak interpretacji o ID '${a.id}' w EUREKA (albo to nie interpretacja indywidualna).`,
                         "not_found",
                     );
                 }
+                // Pelny dokument TAKZE w structuredContent: niektorzy klienci
+                // (m.in. konektory claude.ai) pokazuja modelowi wylacznie
+                // structuredContent - bez tego tresc ginela, mimo ze byla w
+                // content[0].text (zaobserwowane live 2026-07-28).
                 return {
                     content: [
                         { type: "text", text: formatInterpretation(d) },
                     ],
                     structuredContent: {
                         citations: [interpretationCitation(d)],
+                        interpretation: {
+                            id: d.id,
+                            signature: d.sygnatura,
+                            category: d.kategoria,
+                            issue_date: d.dataWydania,
+                            publication_date: d.dataPublikacji,
+                            thesis: d.teza,
+                            content_preview: d.tresc?.slice(0, TEXT_PREVIEW_CHARS),
+                            content_total_chars: d.tresc?.length ?? 0,
+                            url: DOC_UI_URL(d.id),
+                        },
                     },
                 };
             }
@@ -764,7 +882,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         "missing_arg",
                     );
                 }
-                const sugg = await eurekaSuggest(a.phrase);
+                const raw = await eurekaSuggest(a.phrase);
+                const sdrift = suggestDriftError(raw);
+                if (sdrift) {
+                    return errorResult(`${sdrift}. ${API_CHANGED_HINT}`, "api_changed");
+                }
+                const sugg = parseSuggestions(raw);
                 const text =
                     sugg.length > 0
                         ? `Podpowiedzi dla "${a.phrase}":\n- ` + sugg.join("\n- ")
@@ -800,7 +923,11 @@ async function main() {
     process.stderr.write("mcp-eureka server started (stdio transport)\n");
 }
 
-main().catch((err) => {
-    process.stderr.write(`Fatal error: ${err}\n`);
-    process.exit(1);
-});
+// Start tylko przy bezposrednim uruchomieniu - testy importuja funkcje
+// z tego modulu (parseInterpretation, *DriftError, formattery) bez stdio.
+if (require.main === module) {
+    main().catch((err) => {
+        process.stderr.write(`Fatal error: ${err}\n`);
+        process.exit(1);
+    });
+}

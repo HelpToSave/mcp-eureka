@@ -13,12 +13,25 @@ podatek u źródła**. `mcp-eureka` daje Claude'owi dostęp do realnych interpre
 
 **Zakres:** tylko interpretacje indywidualne (`KATEGORIA_INFORMACJI = 1`).
 
+## Instalacja jednym poleceniem (Claude Code)
+
+```bash
+claude mcp add eureka -- npx -y github:HelpToSave/mcp-eureka
+```
+
+> **Windows:** jeśli `npx` nie odpala się bezpośrednio, użyj
+> `claude mcp add eureka -- cmd /c "npx -y github:HelpToSave/mcp-eureka"`.
+> Wymagany Node 18+ i git w PATH; pierwsze uruchomienie buduje serwer
+> (skrypt `prepare`).
+
 ## Tooly
 
-- **`search(query, dateFrom?, dateTo?, searchInContent?, pageSize?, pageNumber?)`**
+- **`search(query, dateFrom?, dateTo?, searchInContent?, fullPhrase?, pageSize?, pageNumber?)`**
   — wyszukiwanie po słowach kluczowych. Domyślnie w tezie/metadanych;
-  `searchInContent=true` szuka w pełnej treści. Zwraca top-N z sygnaturą (SYG),
-  organem, datą wydania i tezą.
+  `searchInContent=true` szuka w pełnej treści; `fullPhrase=true` wymaga
+  wystąpienia **całej frazy dokładnie** (przydatne do przepisów, np.
+  `"art. 22b ustawy"` — domyślne dopasowanie traktuje słowa niezależnie).
+  Zwraca top-N z sygnaturą (SYG), organem, datą wydania i tezą.
 - **`get_interpretation(id)`** — pełna interpretacja po `ID_INFORMACJI`
   (stan faktyczny, stanowisko wnioskodawcy, ocena organu, uzasadnienie),
   pierwsze 4000 znaków. Treść jest oczyszczana z HTML i **sklejana w płynne
@@ -30,6 +43,20 @@ podatek u źródła**. `mcp-eureka` daje Claude'owi dostęp do realnych interpre
 Każda zwrotka zawiera `structuredContent.citations`:
 `title`, `url` (`eureka.mf.gov.pl/informacje/podglad/{id}`), `signature`, `date`,
 `author`, `snippet`, `doc_id`.
+
+`get_interpretation` dodatkowo zwraca `structuredContent.interpretation`
+(sygnatura, daty, teza, `content_preview`, `content_total_chars`, url) — bo
+część klientów MCP (m.in. konektory claude.ai) pokazuje modelowi **wyłącznie**
+`structuredContent`; bez tego pełna treść ginęła mimo obecności w `content`.
+
+## Bezpiecznik na dryf API (`api_changed`)
+
+API EUREKI jest nieoficjalne i może się zmienić bez zapowiedzi. Konektor
+waliduje strukturę każdej odpowiedzi: gdy znikną krytyczne pola
+(`ID_INFORMACJI`, `SYG`/`TEZA`, `dokument.fields`, `suggestion`), zwraca
+jawny błąd **`[api_changed]`** z prośbą o zgłoszenie issue — zamiast cichego
+pustego wyniku, który kosztuje godziny zgadywania. Kosmetyczne zmiany
+kontraktu (nowe pola, przestawiona kolejność) nie wywracają konektora.
 
 ## Stack
 
@@ -58,13 +85,13 @@ npm run build
 node dist/index.js   # serwer na stdio
 ```
 
-## Smoke test
+## Testy
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"s","version":"0"}}}
-{"jsonrpc":"2.0","method":"notifications/initialized"}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search","arguments":{"query":"ulga badawczo-rozwojowa koszty kwalifikowane","pageSize":5}}}' \
-  | node dist/index.js
+npm run test:parse   # offline - parsowanie/formattery/drift guard na realnych
+                     # fixture'ach API (nie wymaga sieci)
+npm run smoke        # LIVE - pelny przebieg 4 tooli po stdio przeciwko
+                     # eureka.mf.gov.pl (throttled; EUREKA miewa przerwy)
 ```
 
 ## Skrypt pomocniczy: porządkowanie plików `.md`
@@ -80,7 +107,7 @@ node scripts/format-md.mjs sciezka/do/pliku.md      # jeden plik
 node scripts/format-md.mjs sciezka/do/folderu        # wszystkie .md w folderze
 ```
 
-## Konfiguracja w Claude Code
+## Konfiguracja ręczna (alternatywa)
 
 W `.mcp.json` projektu (obok innych serwerów). Podaj ścieżkę do `dist/index.js`:
 
