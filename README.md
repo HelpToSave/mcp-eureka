@@ -30,10 +30,11 @@ claude mcp add eureka -- npx -y github:HelpToSave/mcp-eureka
   wystąpienia **całej frazy dokładnie** (przydatne do przepisów, np.
   `"art. 22b ustawy"` — domyślne dopasowanie traktuje słowa niezależnie).
   Zwraca top-N z sygnaturą (SYG), organem, datą wydania i tezą.
-- **`get_interpretation(id)`** — pełna interpretacja po `ID_INFORMACJI`
-  (stan faktyczny, stanowisko wnioskodawcy, ocena organu, uzasadnienie),
-  pierwsze 4000 znaków. Treść jest oczyszczana z HTML i **sklejana w płynne
-  akapity** (`reflowText`) — bez „porozrywanych" pojedynczych wierszy.
+- **`get_interpretation(id, section?, offset?, maxChars?)`** — treść
+  interpretacji po `ID_INFORMACJI`. Zwraca metadane, pełną tezę i **fragment**
+  treści (domyślnie 15 000 znaków) wraz z **mapą sekcji**. Treść jest
+  oczyszczana z HTML i **sklejana w płynne akapity** (`reflowText`) — bez
+  „porozrywanych" pojedynczych wierszy. Zob. [Długie dokumenty](#długie-dokumenty-sekcje-i-offset).
 - **`search_by_signature(signature)`** — skrót: szukaj po sygnaturze KIS
   (np. `0115-KDST2-2.4011.218.2026.2.KK`).
 - **`suggest(phrase)`** — podpowiedzi fraz (autocomplete).
@@ -43,9 +44,41 @@ Każda zwrotka zawiera `structuredContent.citations`:
 `author`, `snippet`, `doc_id`.
 
 `get_interpretation` dodatkowo zwraca `structuredContent.interpretation`
-(sygnatura, daty, teza, `content_preview`, `content_total_chars`, url) — bo
-część klientów MCP (m.in. konektory claude.ai) pokazuje modelowi **wyłącznie**
-`structuredContent`; bez tego pełna treść ginęła mimo obecności w `content`.
+(sygnatura, daty, teza, `content_chunk`, `content_range`, `has_more`,
+`next_offset`, `sections`, url) — bo część klientów MCP (m.in. konektory
+claude.ai) pokazuje modelowi **wyłącznie** `structuredContent`; bez tego treść
+ginęła mimo obecności w `content`.
+
+## Długie dokumenty: sekcje i offset
+
+Interpretacje KIS bywają bardzo długie — **90 tys. znaków to norma** — i mają
+stałą strukturę:
+
+```
+nagłówek → stan faktyczny → pytanie → stanowisko wnioskodawcy
+        → OCENA STANOWISKA + uzasadnienie organu → pouczenie
+```
+
+**Uzasadnienie organu leży ok. 60–70% długości dokumentu.** Oznacza to, że
+fragment liczony od początku pokazuje wyłącznie stan faktyczny — czyli to, co
+napisał wnioskodawca, a nie to, jak organ uzasadnił rozstrzygnięcie. Dlatego
+`get_interpretation` przyjmuje:
+
+| Parametr | Działanie |
+|---|---|
+| `section="uzasadnienie"` | skok do oceny stanowiska i argumentacji organu |
+| `offset=N` | przewinięcie o N znaków (wartość podpowiadana w odpowiedzi) |
+| `maxChars=N` | rozmiar fragmentu, 500–50 000, domyślnie 15 000 |
+
+Dostępne sekcje: `stan_faktyczny`, `pytanie`, `stanowisko`, `uzasadnienie`,
+`rozstrzygniecie`, `pouczenie`. Każda odpowiedź zawiera mapę wykrytych sekcji z
+pozycjami znakowymi oraz — gdy dokument się nie zmieścił — jawne `[...] To
+FRAGMENT` z gotowym `offset` do dalszego ciągu. Model dostaje więc informację,
+że widzi część dokumentu, i wie, jak sięgnąć po resztę.
+
+> Limit istnieje z powodu budżetu tokenów: 90 tys. znaków to ok. 30 tys.
+> tokenów na jeden dokument. Stronicowanie jest świadomym kompromisem — całość
+> pozostaje dostępna, ale model pobiera ją porcjami.
 
 ## Bezpiecznik na dryf API (`api_changed`)
 

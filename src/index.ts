@@ -12,7 +12,8 @@
 //
 // Tooly:
 //   - search             - po slowach kluczowych (+ zakres dat, opcja pelnej tresci)
-//   - get_interpretation - pelna tresc interpretacji po ID
+//   - get_interpretation - tresc interpretacji po ID, porcjami (sekcje + offset;
+//                          uzasadnienie organu lezy na koncu dokumentu)
 //   - search_by_signature- skrot: szukaj po sygnaturze (np. "0115-KDST2-2.4011.218.2026.2.KK")
 //   - suggest            - podpowiedzi fraz (autocomplete)
 //
@@ -556,9 +557,133 @@ export function formatSearchResults(
     return lines.join("\n");
 }
 
-const TEXT_PREVIEW_CHARS = 4000;
+// ---------------------------------------------------------------------------
+// Nawigacja po tresci interpretacji
+//
+// Interpretacje KIS bywaja bardzo dlugie (90 tys. znakow to norma) i maja stala
+// strukture: naglowek -> stan faktyczny -> pytanie -> stanowisko wnioskodawcy
+// -> OCENA STANOWISKA + uzasadnienie organu -> pouczenie. Wartosc merytoryczna
+// (dlaczego organ tak rozstrzygnal) siedzi w koncowce, wiec samo "pierwsze N
+// znakow" jej NIGDY nie pokazuje. Stad: sekcje + offset, zeby model mogl
+// skoczyc do uzasadnienia albo przewinac dokument dalej.
+// ---------------------------------------------------------------------------
 
-export function formatInterpretation(d: Interpretation): string {
+const TEXT_CHUNK_DEFAULT = 15000;
+const TEXT_CHUNK_MAX = 50000;
+
+export interface SectionHit {
+    key: string;
+    label: string;
+    index: number;
+}
+
+// Kolejnosc = kolejnosc w dokumencie. Wzorce celowo waskie, zeby nie lapac
+// tych samych slow uzytych w opisie wnioskodawcy (np. "uzasadnienie stanowiska
+// Wnioskodawcy" nie jest uzasadnieniem ORGANU).
+const SECTION_PATTERNS: { key: string; label: string; re: RegExp }[] = [
+    {
+        key: "stan_faktyczny",
+        label: "Opis stanu faktycznego / zdarzenia przyszlego",
+        re: /Opis\s+(?:stanu faktycznego|zdarzenia przysz|zdarzen|stan[uw])/i,
+    },
+    { key: "pytanie", label: "Pytanie(-a) wnioskodawcy", re: /\bPytani[ae]\b/ },
+    {
+        key: "stanowisko",
+        label: "Stanowisko wnioskodawcy",
+        re: /(?:Państwa stanowisko|Stanowisko Wnioskodawc\w+|Pana stanowisko|Pani stanowisko)/i,
+    },
+    {
+        key: "uzasadnienie",
+        label: "Ocena stanowiska + uzasadnienie organu",
+        re: /(?:Ocena stanowiska|UZASADNIENIE interpretacji indywidualnej)/i,
+    },
+    {
+        key: "rozstrzygniecie",
+        label: "Informacja o zakresie rozstrzygniecia",
+        re: /Informacja o zakresie rozstrzygni/i,
+    },
+    { key: "pouczenie", label: "Pouczenie", re: /\bPouczenie\b/ },
+];
+
+export const SECTION_KEYS = SECTION_PATTERNS.map((s) => s.key);
+
+// Mapa dokumentu: gdzie zaczyna sie ktora sekcja. Model dostaje ja przy kazdym
+// wywolaniu, wiec wie, o jaki fragment poprosic dalej.
+//
+// Skanujemy SEKWENCYJNIE (kazda sekcja szukana dopiero od konca poprzedniej),
+// bo naglowek interpretacji powtarza slownictwo pozniejszych sekcji: formula
+// otwierajaca "Pani stanowisko ... jest prawidlowe" stoi na ~80. znaku i bez
+// wymuszenia kolejnosci przechwytywala kotwice sekcji 'stanowisko'.
+// Sekcja nieznaleziona nie przesuwa kursora - brak jednej nie rozjezdza reszty.
+export function findSections(text: string): SectionHit[] {
+    const out: SectionHit[] = [];
+    let cursor = 0;
+    for (const s of SECTION_PATTERNS) {
+        const m = s.re.exec(text.slice(cursor));
+        if (m && m.index >= 0) {
+            const index = cursor + m.index;
+            out.push({ key: s.key, label: s.label, index });
+            cursor = index + m[0].length;
+        }
+    }
+    return out;
+}
+
+export interface TextView {
+    section?: string;
+    offset?: number;
+    maxChars?: number;
+}
+
+export interface ContentSlice {
+    text: string;
+    start: number;
+    end: number;
+    total: number;
+    limit: number;
+    sections: SectionHit[];
+    sectionUsed?: SectionHit;
+    sectionMissing?: string;
+    hasMore: boolean;
+}
+
+export function sliceContent(tresc: string, view: TextView = {}): ContentSlice {
+    const total = tresc.length;
+    const sections = findSections(tresc);
+    const limit = Math.min(
+        TEXT_CHUNK_MAX,
+        Math.max(500, view.maxChars ?? TEXT_CHUNK_DEFAULT),
+    );
+
+    let base = 0;
+    let sectionUsed: SectionHit | undefined;
+    let sectionMissing: string | undefined;
+    if (view.section) {
+        const hit = sections.find((s) => s.key === view.section);
+        if (hit) {
+            base = hit.index;
+            sectionUsed = hit;
+        } else {
+            sectionMissing = view.section; // brak sekcji -> od poczatku + ostrzezenie
+        }
+    }
+
+    const start = Math.min(total, Math.max(0, base + (view.offset ?? 0)));
+    const end = Math.min(total, start + limit);
+    return {
+        text: tresc.slice(start, end),
+        start,
+        end,
+        total,
+        limit,
+        sections,
+        sectionUsed,
+        sectionMissing,
+        hasMore: end < total,
+    };
+}
+
+export function formatInterpretation(d: Interpretation, view: TextView = {}): string {
     const lines = [
         "=== INTERPRETACJA INDYWIDUALNA (KIS / EUREKA) ===",
         "",
@@ -570,16 +695,42 @@ export function formatInterpretation(d: Interpretation): string {
     ];
     if (d.teza) lines.push("", `Teza: ${d.teza}`);
     lines.push("", `URL: ${DOC_UI_URL(d.id)}`);
-    if (d.tresc) {
-        const preview = d.tresc.slice(0, TEXT_PREVIEW_CHARS);
+
+    if (!d.tresc) return lines.join("\n");
+
+    const s = sliceContent(d.tresc, view);
+
+    if (s.sections.length > 0) {
+        lines.push("", "--- Mapa dokumentu (znak poczatkowy sekcji) ---");
+        for (const sec of s.sections) {
+            lines.push(`  ${String(sec.index).padStart(7)}  [${sec.key}] ${sec.label}`);
+        }
+    }
+    if (s.sectionMissing) {
         lines.push(
             "",
-            `--- Tresc (pierwsze ${Math.min(TEXT_PREVIEW_CHARS, d.tresc.length)} znakow z ${d.tresc.length} lacznie) ---`,
-            preview,
+            `[uwaga] Nie znaleziono sekcji '${s.sectionMissing}' w tym dokumencie - ` +
+                `pokazuje od poczatku. Dostepne sekcje: mapa powyzej.`,
         );
-        if (d.tresc.length > TEXT_PREVIEW_CHARS) {
-            lines.push(`[...] Skrocono. Pelna tresc: ${DOC_UI_URL(d.id)}`);
-        }
+    }
+
+    const where = s.sectionUsed
+        ? ` | sekcja: [${s.sectionUsed.key}] ${s.sectionUsed.label}`
+        : "";
+    lines.push(
+        "",
+        `--- Tresc: znaki ${s.start}-${s.end} z ${s.total} lacznie${where} ---`,
+        s.text,
+    );
+
+    if (s.hasMore) {
+        lines.push(
+            "",
+            `[...] To FRAGMENT (${s.end - s.start} z ${s.total} znakow). Dalszy ciag: ` +
+                `get_interpretation id="${d.id}" offset=${s.end}. ` +
+                `Uzasadnienie organu: get_interpretation id="${d.id}" section="uzasadnienie". ` +
+                `Calosc w przegladarce: ${DOC_UI_URL(d.id)}`,
+        );
     }
     return lines.join("\n");
 }
@@ -599,8 +750,15 @@ const INSTRUCTIONS = `Ten serwer MCP udostepnia polskie INTERPRETACJE INDYWIDUAL
 2. \`search\` - po slowach kluczowych (query), z opcjonalnym zakresem dat (dateFrom/dateTo, YYYY-MM-DD), flaga searchInContent (true = szukaj w pelnej tresci, nie tylko w tezie) i flaga fullPhrase (true = cala fraza dokladnie, np. przepis 'art. 22b ustawy'; domyslnie slowa niezaleznie). Zwraca liste z sygnatura, organem, data i teza.
 3. \`suggest\` - podpowiedzi fraz, gdy zapytanie jest niejednoznaczne.
 
-### Pelna tresc
-4. \`get_interpretation\` - po ID (z wynikow search) zwraca metadane + pelna tresc (pytanie wnioskodawcy, jego stanowisko, ocena organu, uzasadnienie) - pierwsze 4000 znakow.
+### Tresc interpretacji
+4. \`get_interpretation\` - po ID (z wynikow search) zwraca metadane, teze i FRAGMENT tresci (domyslnie 15000 znakow od poczatku) + mape sekcji z pozycjami znakowymi.
+
+**KLUCZOWE: jedno wywolanie to nie caly dokument.** Interpretacje KIS maja czesto 50-100 tys. znakow i stala strukture: naglowek -> stan faktyczny -> pytanie -> stanowisko wnioskodawcy -> **ocena stanowiska i uzasadnienie organu** -> pouczenie. Uzasadnienie organu (czyli DLACZEGO organ tak rozstrzygnal - zwykle jedyne, co ma wartosc dla doradcy) lezy ok. 60-70% dlugosci dokumentu, wiec domyslny fragment od poczatku go NIE zawiera.
+
+- Pytanie o argumentacje/uzasadnienie/podstawe rozstrzygniecia -> \`get_interpretation(id, section="uzasadnienie")\`, NIE samo \`get_interpretation(id)\`.
+- Dalszy ciag fragmentu -> \`offset\` z wartoscia podana w komunikacie \`[...]\` (albo \`next_offset\` w structuredContent).
+- Sam werdykt (prawidlowe/nieprawidlowe) jest w formule otwierajacej, wiec widac go od razu - ale NIE myl werdyktu z uzasadnieniem.
+- Jesli cytujesz uzasadnienie, upewnij sie, ze faktycznie pobrales sekcje \`uzasadnienie\` - nie zgaduj argumentacji organu ze stanu faktycznego.
 
 ## Twarde ograniczenia
 
@@ -692,10 +850,14 @@ const TOOLS = [
         name: "get_interpretation",
         annotations: READ_ONLY_ANNOTATIONS,
         description:
-            "Pobiera pelna interpretacje indywidualna po ID (z wynikow 'search'). " +
-            "Zwraca metadane (sygnatura, data wydania/publikacji, teza) oraz pelna " +
-            "tresc (stan faktyczny, stanowisko wnioskodawcy, ocena organu, uzasadnienie) " +
-            "- pierwsze 4000 znakow.",
+            "Pobiera interpretacje indywidualna po ID (z wynikow 'search'): metadane " +
+            "(sygnatura, daty, teza) + FRAGMENT tresci. Interpretacje KIS bywaja bardzo " +
+            "dlugie (90 tys. znakow to norma), wiec tresc zwracana jest porcjami po " +
+            "15000 znakow - jedno wywolanie to NIE caly dokument. " +
+            "UWAGA: uzasadnienie organu jest na KONCU dokumentu, wiec domyslny fragment " +
+            "od poczatku go NIE zawiera - uzyj section='uzasadnienie'. " +
+            "Kazda zwrotka zawiera mape sekcji z pozycjami znakowymi; dalsze partie " +
+            "pobierz przez offset. Bledy: `missing_arg`, `not_found`, `api_changed`.",
         inputSchema: {
             type: "object",
             properties: {
@@ -703,6 +865,39 @@ const TOOLS = [
                     type: "string",
                     description:
                         "ID interpretacji (ID_INFORMACJI) z wynikow search, np. '694514'.",
+                },
+                section: {
+                    type: "string",
+                    enum: [
+                        "stan_faktyczny",
+                        "pytanie",
+                        "stanowisko",
+                        "uzasadnienie",
+                        "rozstrzygniecie",
+                        "pouczenie",
+                    ],
+                    description:
+                        "Skok do sekcji dokumentu. NAJWAZNIEJSZE: 'uzasadnienie' = " +
+                        "ocena stanowiska i argumentacja organu (to zwykle jedyne, " +
+                        "czego szuka doradca; lezy ok. 60-70% dlugosci dokumentu, " +
+                        "wiec bez tego parametru pozostaje poza zasiegiem). " +
+                        "Bez tego parametru: od poczatku dokumentu.",
+                },
+                offset: {
+                    type: "number",
+                    description:
+                        "Przesuniecie w znakach. Bez 'section' - od poczatku dokumentu; " +
+                        "z 'section' - wzgledem poczatku tej sekcji. Do przewijania " +
+                        "dlugich fragmentow (uzyj wartosci podanej w komunikacie [...]).",
+                    minimum: 0,
+                },
+                maxChars: {
+                    type: "number",
+                    description:
+                        "Ile znakow tresci zwrocic (500-50000). Domyslnie 15000. " +
+                        "Zwiekszaj ostroznie - 50000 znakow to ok. 15 tys. tokenow.",
+                    minimum: 500,
+                    maximum: 50000,
                 },
             },
             required: ["id"],
@@ -760,7 +955,7 @@ function errorResult(text: string, code: ErrorCode) {
 }
 
 const server = new Server(
-    { name: "mcp-eureka", version: "1.1.0" }, // sync z package.json "version"
+    { name: "mcp-eureka", version: "1.2.0" }, // sync z package.json "version"
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
 );
 
@@ -850,13 +1045,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         "not_found",
                     );
                 }
-                // Pelny dokument TAKZE w structuredContent: niektorzy klienci
-                // (m.in. konektory claude.ai) pokazuja modelowi wylacznie
+                if (
+                    a.section !== undefined &&
+                    (typeof a.section !== "string" || !SECTION_KEYS.includes(a.section))
+                ) {
+                    return errorResult(
+                        `parametr 'section' musi byc jedna z wartosci: ${SECTION_KEYS.join(", ")}.`,
+                        "missing_arg",
+                    );
+                }
+                const view: TextView = {
+                    section: typeof a.section === "string" ? a.section : undefined,
+                    offset: typeof a.offset === "number" ? a.offset : undefined,
+                    maxChars: typeof a.maxChars === "number" ? a.maxChars : undefined,
+                };
+                const slice = d.tresc ? sliceContent(d.tresc, view) : undefined;
+                // Tresc TAKZE w structuredContent: niektorzy klienci (m.in.
+                // konektory claude.ai) pokazuja modelowi wylacznie
                 // structuredContent - bez tego tresc ginela, mimo ze byla w
                 // content[0].text (zaobserwowane live 2026-07-28).
                 return {
                     content: [
-                        { type: "text", text: formatInterpretation(d) },
+                        { type: "text", text: formatInterpretation(d, view) },
                     ],
                     structuredContent: {
                         citations: [interpretationCitation(d)],
@@ -867,8 +1077,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                             issue_date: d.dataWydania,
                             publication_date: d.dataPublikacji,
                             thesis: d.teza,
-                            content_preview: d.tresc?.slice(0, TEXT_PREVIEW_CHARS),
+                            content_chunk: slice?.text,
+                            content_range: slice
+                                ? { start: slice.start, end: slice.end, total: slice.total }
+                                : undefined,
                             content_total_chars: d.tresc?.length ?? 0,
+                            has_more: slice?.hasMore ?? false,
+                            next_offset: slice?.hasMore ? slice.end : undefined,
+                            sections: slice?.sections,
                             url: DOC_UI_URL(d.id),
                         },
                     },

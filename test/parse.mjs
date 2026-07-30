@@ -24,6 +24,8 @@ const {
     searchDriftError,
     detailDriftError,
     suggestDriftError,
+    findSections,
+    sliceContent,
     stripHtml,
     reflowText,
 } = require(join(__dirname, "..", "dist", "index.js"));
@@ -47,15 +49,79 @@ const fx = (name) =>
 
     const text = formatInterpretation(d);
     check(text.includes("0112-KDIL3.4012.367.2026.2.AK"), "format: sygnatura");
-    check(/Tresc \(pierwsze \d+ znakow/.test(text), "format: naglowek tresci");
+    check(/Tresc: znaki \d+-\d+ z \d+/.test(text), "format: naglowek zakresu znakow");
+    check(text.includes("Mapa dokumentu"), "format: mapa sekcji");
     check(
         text.includes("eureka.mf.gov.pl/informacje/podglad/698723"),
         "format: URL portalu",
     );
+    // Model MUSI dostac jawna informacje, ze to fragment + jak siegnac po reszte.
+    check(text.includes("To FRAGMENT"), "format: jawne oznaczenie fragmentu");
+    check(/offset=\d+/.test(text), "format: instrukcja offset");
+    check(text.includes('section="uzasadnienie"'), "format: wskazowka o uzasadnieniu");
 
     const cit = interpretationCitation(d);
     check(cit.doc_id === "698723", `citation doc_id: ${cit.doc_id}`);
     check(cit.signature === "0112-KDIL3.4012.367.2026.2.AK", "citation signature");
+}
+
+// --- sekcje: regresja na wpadke "pierwsze 4000 znakow" ---------------------
+// Uzasadnienie organu lezy ~73% dlugosci dokumentu. Bez skoku do sekcji model
+// widzi wylacznie stan faktyczny i NIE MOZE cytowac argumentacji organu.
+{
+    const d = parseInterpretation(fx("detail-698723.json"), "698723");
+    const t = d.tresc;
+    const sec = findSections(t);
+    const byKey = Object.fromEntries(sec.map((s) => [s.key, s.index]));
+
+    check(sec.length >= 5, `wykryto sekcje: ${sec.map((s) => s.key).join(", ")}`);
+    // Kolejnosc sekcji musi rosnac - inaczej naglowek przechwytuje kotwice.
+    check(
+        sec.every((s, i) => i === 0 || sec[i - 1].index < s.index),
+        "sekcje w kolejnosci dokumentu",
+    );
+    check(
+        byKey.stanowisko > byKey.stan_faktyczny,
+        `'stanowisko' po stanie faktycznym (${byKey.stanowisko} > ${byKey.stan_faktyczny}) ` +
+            "- regresja: formula otwierajaca przechwytywala kotwice",
+    );
+    check(byKey.uzasadnienie > 4000, "uzasadnienie poza starym limitem 4000");
+
+    // section='uzasadnienie' musi trafic w ocene organu, nie w stan faktyczny.
+    const u = sliceContent(t, { section: "uzasadnienie" });
+    check(u.start === byKey.uzasadnienie, "slice startuje na sekcji uzasadnienia");
+    check(
+        /Ocena stanowiska|Uzasadnienie interpretacji/i.test(u.text.slice(0, 200)),
+        "tresc uzasadnienia zaczyna sie od oceny organu",
+    );
+    check(
+        /Zgodnie z (?:przepisem |art)/i.test(u.text),
+        "uzasadnienie zawiera wywod prawny organu",
+    );
+
+    // offset domyka caly dokument, bez petli i bez gubienia znakow.
+    let off = 0;
+    let guard = 0;
+    let joined = "";
+    while (guard++ < 100) {
+        const s = sliceContent(t, { offset: off });
+        joined += s.text;
+        if (!s.hasMore) break;
+        off = s.end;
+    }
+    check(joined.length === t.length, `stronicowanie odtwarza calosc: ${joined.length}/${t.length}`);
+    check(guard < 100, "stronicowanie bez petli");
+
+    // limity i przypadki brzegowe
+    check(sliceContent(t, { maxChars: 999999 }).limit === 50000, "maxChars przyciete do 50000");
+    check(sliceContent(t, { maxChars: 10 }).limit === 500, "maxChars podniesione do 500");
+    check(sliceContent(t, { offset: 999999 }).text === "", "offset poza koncem = pusty");
+    check(
+        sliceContent(t, { section: "nie_ma_takiej" }).sectionMissing === "nie_ma_takiej",
+        "nieznana sekcja sygnalizowana, nie cicha",
+    );
+    check(sliceContent(t, { section: "nie_ma_takiej" }).start === 0, "nieznana sekcja -> od poczatku");
+    check(findSections("tekst bez zadnych naglowkow").length === 0, "brak sekcji = pusta mapa");
 }
 
 // --- search: formatter + citations -----------------------------------------

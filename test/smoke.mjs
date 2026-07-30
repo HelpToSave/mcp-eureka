@@ -5,7 +5,10 @@
 //   2. search_by_signature  -> dokladna sygnatura = dokladnie 1 trafienie
 //   3. search               -> fraza zwraca wyniki; fullPhrase zaweza (<=)
 //   4. get_interpretation   -> tresc obecna + structuredContent.interpretation
-//   5. suggest              -> tablica stringow
+//   5. section=uzasadnienie -> trafia w ocene organu (nie w stan faktyczny)
+//   6. offset               -> zwraca dalsza, inna partie tekstu
+//   7. zla sekcja           -> czytelny blad
+//   8. suggest              -> tablica stringow
 // Wymaga `npm run build`. Uwaga: EUREKA miewa przerwy - FAIL upstream_error
 // na wszystkich krokach oznacza zwykle awarie MF, nie regresje konektora.
 
@@ -114,7 +117,7 @@ async function runSmoke() {
             `fullPhrase zaweza: ${tStrict} <= ${tLoose}`,
         );
 
-        // 4. pelny dokument + structuredContent.interpretation
+        // 4. tresc dokumentu + structuredContent.interpretation
         const doc = await rpc("tools/call", {
             name: "get_interpretation",
             arguments: { id: DOC_ID },
@@ -122,15 +125,53 @@ async function runSmoke() {
         const docText = doc.content?.[0]?.text ?? "";
         check(!doc.isError, "get_interpretation bez isError");
         check(docText.includes(SIG), "get_interpretation sygnatura zgodna");
-        check(/Tresc \(pierwsze \d+ znakow/.test(docText), "get_interpretation ma tresc");
+        check(/Tresc: znaki \d+-\d+ z \d+/.test(docText), "get_interpretation ma tresc");
         const interp = doc.structuredContent?.interpretation;
         check(
-            typeof interp?.content_preview === "string" &&
-                interp.content_preview.length > 500,
-            "structuredContent.interpretation.content_preview obecne",
+            typeof interp?.content_chunk === "string" && interp.content_chunk.length > 500,
+            "structuredContent.interpretation.content_chunk obecne",
+        );
+        check(Array.isArray(interp?.sections), "structuredContent ma mape sekcji");
+
+        // 5. skok do uzasadnienia organu - sedno interpretacji, lezy na koncu
+        const uzas = await rpc("tools/call", {
+            name: "get_interpretation",
+            arguments: { id: DOC_ID, section: "uzasadnienie" },
+        });
+        const uText = uzas.content?.[0]?.text ?? "";
+        check(!uzas.isError, "get_interpretation(section=uzasadnienie) bez isError");
+        check(
+            /Ocena stanowiska|Uzasadnienie interpretacji/i.test(uText),
+            "section=uzasadnienie trafia w ocene organu",
+        );
+        const uRange = uzas.structuredContent?.interpretation?.content_range;
+        check(
+            uRange?.start > 0 && uRange.start < uRange.total,
+            `uzasadnienie startuje w glebi dokumentu (${uRange?.start}/${uRange?.total})`,
         );
 
-        // 5. suggest
+        // 6. offset - dalsza partia tekstu, inna niz pierwsza
+        const nextOff = doc.structuredContent?.interpretation?.next_offset;
+        if (typeof nextOff === "number") {
+            const page2 = await rpc("tools/call", {
+                name: "get_interpretation",
+                arguments: { id: DOC_ID, offset: nextOff },
+            });
+            const chunk2 = page2.structuredContent?.interpretation?.content_chunk;
+            check(
+                typeof chunk2 === "string" && chunk2 !== interp.content_chunk,
+                "offset zwraca inny fragment niz pierwsze wywolanie",
+            );
+        }
+
+        // 7. zla nazwa sekcji -> czytelny blad, nie cichy fallback
+        const badSec = await rpc("tools/call", {
+            name: "get_interpretation",
+            arguments: { id: DOC_ID, section: "bzdura" },
+        });
+        check(badSec.isError === true, "nieznana sekcja -> isError");
+
+        // 8. suggest
         const sug = await rpc("tools/call", {
             name: "suggest",
             arguments: { phrase: "ulga na" },
