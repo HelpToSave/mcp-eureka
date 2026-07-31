@@ -54,8 +54,26 @@ const SEARCH_COLUMNS = [
     "DATA_PUBLIKACJI",
 ];
 
-// Sort: ID rosnie chronologicznie -> DESC = najnowsze pierwsze (pewny, dziala).
-const SORT_SPEC = "ID_INFORMACJI,DESC";
+// Sortowanie. POMINIECIE parametru `sort` = domyslne sortowanie Elasticsearcha
+// po TRAFNOSCI (backend EUREKI to ES - odpowiedz zawiera elasticDocumentId).
+//
+// To NIE jest kosmetyka. Zmierzone 2026-07-31 na zapytaniu "50% koszty uzyskania
+// przychodow aktor prawa autorskie" (2622 dopasowania):
+//   sort=ID_INFORMACJI,DESC -> licencje na oprogramowanie, UPO polsko-belgijska,
+//                              IP Box, WHT... zero trafien w temat
+//   bez sort                -> "Czy wnioskodawca ma prawo zastosowac 50% koszty
+//                              uzyskania przychodu?", honorarium autorskie,
+//                              art. 22 ust. 9 pkt 3... same trafienia w temat
+// Przy kilku tysiacach rozmytych dopasowan sortowanie po dacie zwracalo
+// 10 NAJNOWSZYCH zamiast 10 NAJTRAFNIEJSZYCH.
+const SORT_MODES = {
+    trafnosc: undefined, // brak parametru sort -> ranking ES po _score
+    data_desc: "ID_INFORMACJI,DESC",
+    data_asc: "ID_INFORMACJI,ASC",
+} as const;
+
+export type SortMode = keyof typeof SORT_MODES;
+export const SORT_KEYS = Object.keys(SORT_MODES) as SortMode[];
 
 // ---------------------------------------------------------------------------
 // Klient HTTP (JSON, GET/POST)
@@ -342,6 +360,7 @@ interface SearchParams {
     dateTo?: string;
     searchInContent?: boolean;
     fullPhrase?: boolean;
+    sort?: SortMode;
     pageSize?: number;
     pageNumber?: number;
 }
@@ -352,6 +371,7 @@ interface SearchResponse {
     results?: EurekaRow[];
     totalHits?: number;
     elasticDocumentId?: string;
+    sortMode?: SortMode; // dokladane lokalnie, nie pochodzi z API
 }
 
 async function eurekaSearch(p: SearchParams): Promise<SearchResponse> {
@@ -379,11 +399,16 @@ async function eurekaSearch(p: SearchParams): Promise<SearchResponse> {
     const size = Math.min(50, Math.max(1, p.pageSize ?? 10));
     const page = Math.max(0, (p.pageNumber ?? 1) - 1);
 
+    // Domyslnie trafnosc: `sort` jest POMIJANY, nie ustawiany na inna wartosc.
+    const sortSpec = SORT_MODES[p.sort ?? "trafnosc"];
+    const query: Record<string, string | number> = { size, page };
+    if (sortSpec !== undefined) query.sort = sortSpec;
+
     return throttled(() =>
         httpJson<SearchResponse>({
             method: "POST",
             path: "/wyszukiwarka/informacje",
-            query: { size, page, sort: SORT_SPEC },
+            query,
             body,
         }),
     );
@@ -515,24 +540,61 @@ export function interpretationCitation(d: Interpretation): Citation {
 // Formattery (czlowieko/LLM-czytelne)
 // ---------------------------------------------------------------------------
 
+// Zapytanie "wyglada na polskie, ale bez diakrytykow" - najczestsza cicha
+// przyczyna zera trafien. EUREKA NIE normalizuje znakow: zmierzone 2026-07-31
+// "podwyzszone koszty uzyskania" = 0 trafien, "podwyższone koszty uzyskania"
+// = 293 077. Wykrywamy rdzenie, ktore po polsku prawie zawsze maja diakrytyk.
+const ASCII_TRAP_RE =
+    /\b(?:tworc\w*|dzialalnosc\w*|swiadcz\w*|uslug\w*|przychod\w*|koszt(?:ow|y)?\b|wynagrodzen\w*|podwyzszon\w*|zrodl\w*|rozwojow\w*|wlasnosc\w*|nieruchomosc\w*|dzialk\w*|sprzedaz\w*|obowiazk\w*|zwolnien\w*|badawczo)\b/i;
+
+export function asciiTrapHint(query?: string): string | null {
+    if (!query) return null;
+    if (/[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]/.test(query)) return null; // diakrytyki obecne
+    return ASCII_TRAP_RE.test(query)
+        ? "UWAGA: zapytanie nie zawiera polskich znakow diakrytycznych, a EUREKA " +
+              "ich NIE normalizuje - 'podwyzszone' daje 0 trafien, 'podwyższone' " +
+              "ponad 290 tys. Powtorz zapytanie z poprawna pisownia (ą/ć/ę/ł/ń/ó/ś/ź/ż)."
+        : null;
+}
+
 export function formatSearchResults(
     headline: string,
     resp: SearchResponse,
+    query?: string,
 ): string {
     const rows = resp.results ?? [];
     if (rows.length === 0) {
+        const hint = asciiTrapHint(query);
         return (
             headline +
             "\n\nBrak interpretacji indywidualnych dla podanych kryteriow." +
-            "\n\nPodpowiedz: sprobuj innych slow kluczowych, ustaw searchInContent=true" +
-            " (szukanie w pelnej tresci, nie tylko w tezie), albo poszerz zakres dat."
+            (hint ? `\n\n${hint}` : "") +
+            "\n\nPodpowiedzi: (1) uzyj 2-4 slow kluczowych zamiast calego zdania" +
+            " - dluga frazy rozmywaja ranking; (2) sprawdz polskie znaki" +
+            " diakrytyczne; (3) jesli uzyles fullPhrase=true, wylacz go;" +
+            " (4) searchInContent=true ZAWEZA wyniki - sprobuj bez niego;" +
+            " (5) sprobuj synonimu ('honorarium autorskie' vs '50% koszty uzyskania')."
         );
     }
-    const lines = [
-        headline,
-        `Znaleziono: ${resp.totalHits ?? rows.length} interpretacji (pokazano ${rows.length}).`,
-        "",
-    ];
+    const total = resp.totalHits ?? rows.length;
+    const lines = [headline];
+    // totalHits jest MOCNO zawyzony: EUREKA dopasowuje rozmyto/po rdzeniach
+    // (zmierzone: "aktor" = 14 322 trafien). Bez tego ostrzezenia model raportuje
+    // te liczbe jako "tyle jest interpretacji w temacie", co jest nieprawda.
+    lines.push(
+        `Dopasowan wg EUREKI: ${total} (pokazano ${rows.length}, sortowanie: ${
+            resp.sortMode ?? "trafnosc"
+        }).`,
+    );
+    if (total > 1000) {
+        lines.push(
+            `[uwaga] ${total} to liczba ROZMYTYCH dopasowan wyszukiwarki, nie liczba` +
+                " interpretacji na temat - EUREKA dopasowuje po rdzeniach slow." +
+                " NIE podawaj jej uzytkownikowi jako liczby trafnych interpretacji." +
+                " Oceniaj trafnosc po tezach ponizej.",
+        );
+    }
+    lines.push("");
     for (const row of rows) {
         const id = asText(row["ID_INFORMACJI"]) ?? "?";
         const sig = asText(row["SYG"]) ?? "brak_sygnatury";
@@ -548,10 +610,11 @@ export function formatSearchResults(
         lines.push(`  (pelna tresc: get_interpretation id="${id}")`);
         lines.push("");
     }
-    const total = resp.totalHits ?? rows.length;
     if (total > rows.length) {
         lines.push(
-            `[Wiecej wynikow: ${total - rows.length}. Zwieksz pageNumber lub zaweż kryteria / daty.]`,
+            `[Dalsze dopasowania: ${total - rows.length}. Zwieksz pageNumber, zaweź` +
+                " kryteria/daty albo zadaj kilka WEZSZYCH zapytan zamiast jednego" +
+                " szerokiego - to skuteczniejsze niz przewijanie rankingu.]",
         );
     }
     return lines.join("\n");
@@ -747,8 +810,20 @@ const INSTRUCTIONS = `Ten serwer MCP udostepnia polskie INTERPRETACJE INDYWIDUAL
 1. \`search_by_signature\` - po sygnaturze KIS (np. "0115-KDST2-2.4011.218.2026.2.KK"). Najszybciej.
 
 ### Szerokie szukanie
-2. \`search\` - po slowach kluczowych (query), z opcjonalnym zakresem dat (dateFrom/dateTo, YYYY-MM-DD), flaga searchInContent (true = szukaj w pelnej tresci, nie tylko w tezie) i flaga fullPhrase (true = cala fraza dokladnie, np. przepis 'art. 22b ustawy'; domyslnie slowa niezaleznie). Zwraca liste z sygnatura, organem, data i teza.
+2. \`search\` - po słowach kluczowych (query), z opcjonalnym zakresem dat (dateFrom/dateTo, YYYY-MM-DD), flagami searchInContent i fullPhrase (obie ZAWĘŻAJĄ) oraz sort (domyślnie trafność). Zwraca listę z sygnaturą, organem, datą i tezą.
 3. \`suggest\` - podpowiedzi fraz, gdy zapytanie jest niejednoznaczne.
+
+## Jak pytać, żeby trafiać (recall i precyzja)
+
+Wyszukiwarka EUREKI to Elasticsearch z rozmytym dopasowaniem po rdzeniach słów. Zmierzone zachowania, których musisz być świadomy:
+
+- **PISZ Z POLSKIMI ZNAKAMI.** EUREKA NIE normalizuje diakrytyków. "podwyzszone koszty uzyskania" = **0 trafień**, "podwyższone koszty uzyskania" = **293 077**. To najczęstsza cicha przyczyna pustego wyniku. Zawsze: ą, ć, ę, ł, ń, ó, ś, ź, ż.
+- **2-4 słowa kluczowe, nie całe zdanie.** Długie frazy rozmywają ranking ("aktor" 14 322 → "50% koszty uzyskania przychodu twórca aktor" 2 342, ale z gorszym dopasowaniem czołówki).
+- **Kilka wąskich zapytań bije jedno szerokie.** Pytanie o 50% KUP dla aktorów: osobno "honorarium autorskie aktor", "prawa pokrewne artysty wykonawcy", "50% koszty uzyskania przychodów twórca". Terminologia KIS bywa inna niż potoczna - sprawdź warianty, zanim uznasz, że interpretacji nie ma.
+- **Liczba dopasowań jest zawyżona.** "aktor" daje 14 322 dopasowań, co NIE znaczy 14 322 interpretacji o aktorach. Nigdy nie podawaj tej liczby użytkownikowi jako liczby trafnych interpretacji - oceniaj trafność po tezach.
+- **Sortowanie: zostaw domyślną trafność.** \`sort="data_desc"\` przy tysiącach dopasowań zwraca najnowsze, a nie trafne - używaj go wyłącznie, gdy pytanie wprost dotyczy aktualności.
+- **searchInContent i fullPhrase zawężają**, nie poszerzają. Gdy masz za mało wyników - wyłącz je. Gdy za dużo szumu - włącz.
+- **Zero wyników to zwykle wada zapytania, nie brak interpretacji.** Zanim odpowiesz "nie ma", spróbuj: diakrytyki, krótsze zapytanie, synonim, \`suggest\`.
 
 ### Tresc interpretacji
 4. \`get_interpretation\` - po ID (z wynikow search) zwraca metadane, teze i FRAGMENT tresci (domyslnie 15000 znakow od poczatku) + mape sekcji z pozycjami znakowymi.
@@ -778,9 +853,12 @@ Tool zwraca \`isError: true\` + tekst z prefiksem \`[code]\`:
 
 ## Styl odpowiedzi
 
-- Cytuj z sygnatura i data: "0115-KDST2-2.4011.218.2026.2.KK (interpretacja indywidualna, 2026-06-01)".
-- NIE wymyslaj sygnatur - wszystko z \`structuredContent.citations\`.
-- Dla zestawien sortuj chronologicznie i zaznaczaj rozbieznosci w stanowisku organu.`;
+- Cytuj z sygnaturą i datą: "0115-KDST2-2.4011.218.2026.2.KK (interpretacja indywidualna, 2026-06-01)".
+- NIE wymyślaj sygnatur - wszystko z \`structuredContent.citations\`.
+- Cytuj wyłącznie fragmenty, które FAKTYCZNIE pobrałeś. Jeśli przywołujesz argumentację organu, najpierw pobierz \`section="uzasadnienie"\` - teza i werdykt nie wystarczą do zreferowania uzasadnienia.
+- Rozróżniaj: teza (streszczenie redakcyjne), werdykt (prawidłowe/nieprawidłowe) i uzasadnienie (wywód organu). To trzy różne rzeczy.
+- Powiedz użytkownikowi, na ilu interpretacjach opierasz wniosek i że przeszukanie nie jest wyczerpujące - EUREKA zwraca ranking, nie komplet.
+- Dla zestawień sortuj chronologicznie i zaznaczaj rozbieżności w stanowisku organu.`;
 
 // ---------------------------------------------------------------------------
 // Definicje narzedzi
@@ -822,14 +900,26 @@ const TOOLS = [
                 searchInContent: {
                     type: "boolean",
                     description:
-                        "true = szukaj w pelnej tresci interpretacji (nie tylko w tezie). Domyslnie false.",
+                        "true = wymagaj dopasowania w pelnej tresci. To ZAWEZA wyniki " +
+                        "(zmierzone: 'Angola' 102 -> 37 trafien), wiec sluzy precyzji, " +
+                        "NIE zwiekszaniu liczby wynikow. Domyslnie false.",
                 },
                 fullPhrase: {
                     type: "boolean",
                     description:
-                        "true = cala fraza musi wystapic DOKLADNIE (przydatne dla " +
-                        "przepisow, np. 'art. 22b ustawy'; czesto malo trafien). " +
-                        "Domyslnie false = slowa dopasowywane niezaleznie.",
+                        "true = cala fraza musi wystapic DOKLADNIE. Mocno zaweza " +
+                        "('art. 22b': 120 tys. -> 4 tys.). Przydatne do przepisow " +
+                        "i utartych zwrotow. Domyslnie false = slowa niezaleznie.",
+                },
+                sort: {
+                    type: "string",
+                    enum: ["trafnosc", "data_desc", "data_asc"],
+                    description:
+                        "Kolejnosc wynikow. 'trafnosc' (DOMYSLNE) = ranking dopasowania " +
+                        "- prawie zawsze tego chcesz. 'data_desc' = najnowsze pierwsze; " +
+                        "uzywaj TYLKO gdy pytanie dotyczy aktualnosci ('najnowsze " +
+                        "interpretacje o...'), bo przy tysiacach dopasowan zwraca " +
+                        "najswiezsze zamiast trafnych. 'data_asc' = najstarsze.",
                 },
                 pageSize: {
                     type: "number",
@@ -955,7 +1045,7 @@ function errorResult(text: string, code: ErrorCode) {
 }
 
 const server = new Server(
-    { name: "mcp-eureka", version: "1.2.0" }, // sync z package.json "version"
+    { name: "mcp-eureka", version: "1.3.0" }, // sync z package.json "version"
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
 );
 
@@ -972,13 +1062,22 @@ async function handleSearch(headline: string, params: SearchParams) {
     const resp = await eurekaSearch(params);
     const drift = searchDriftError(resp);
     if (drift) return errorResult(`${drift}. ${API_CHANGED_HINT}`, "api_changed");
+    resp.sortMode = params.sort ?? "trafnosc";
     return {
         content: [
-            { type: "text", text: formatSearchResults(headline, resp) },
+            {
+                type: "text",
+                text: formatSearchResults(headline, resp, params.query),
+            },
         ],
         structuredContent: {
             citations: (resp.results ?? []).map(rowCitation),
             total_hits: resp.totalHits ?? (resp.results ?? []).length,
+            fuzzy_total: true, // totalHits = rozmyte dopasowania, nie trafne wyniki
+            sort: resp.sortMode,
+            ...(asciiTrapHint(params.query) && {
+                query_warning: asciiTrapHint(params.query),
+            }),
         },
     };
 }
@@ -993,7 +1092,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 if (!a.query || typeof a.query !== "string") {
                     return errorResult("parametr 'query' jest wymagany.", "missing_arg");
                 }
-                const headline = `Wynik search(query="${a.query}", daty=${a.dateFrom ?? "*"}..${a.dateTo ?? "*"}, wTresci=${a.searchInContent === true}, calaFraza=${a.fullPhrase === true}):`;
+                if (
+                    a.sort !== undefined &&
+                    (typeof a.sort !== "string" || !SORT_KEYS.includes(a.sort as SortMode))
+                ) {
+                    return errorResult(
+                        `parametr 'sort' musi byc jedna z wartosci: ${SORT_KEYS.join(", ")}.`,
+                        "missing_arg",
+                    );
+                }
+                const headline = `Wynik search(query="${a.query}", daty=${a.dateFrom ?? "*"}..${a.dateTo ?? "*"}, wTresci=${a.searchInContent === true}, calaFraza=${a.fullPhrase === true}, sort=${a.sort ?? "trafnosc"}):`;
                 return await handleSearch(headline, {
                     query: a.query,
                     dateFrom:
@@ -1007,6 +1115,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         typeof a.fullPhrase === "boolean"
                             ? a.fullPhrase
                             : undefined,
+                    sort: typeof a.sort === "string" ? (a.sort as SortMode) : undefined,
                     pageSize:
                         typeof a.pageSize === "number" ? a.pageSize : undefined,
                     pageNumber:

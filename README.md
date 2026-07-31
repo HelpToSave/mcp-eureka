@@ -24,12 +24,11 @@ claude mcp add eureka -- npx -y github:HelpToSave/mcp-eureka
 
 ## Tooly
 
-- **`search(query, dateFrom?, dateTo?, searchInContent?, fullPhrase?, pageSize?, pageNumber?)`**
-  — wyszukiwanie po słowach kluczowych. Domyślnie w tezie/metadanych;
-  `searchInContent=true` szuka w pełnej treści; `fullPhrase=true` wymaga
-  wystąpienia **całej frazy dokładnie** (przydatne do przepisów, np.
-  `"art. 22b ustawy"` — domyślne dopasowanie traktuje słowa niezależnie).
-  Zwraca top-N z sygnaturą (SYG), organem, datą wydania i tezą.
+- **`search(query, dateFrom?, dateTo?, searchInContent?, fullPhrase?, sort?, pageSize?, pageNumber?)`**
+  — wyszukiwanie po słowach kluczowych, **domyślnie sortowane po trafności**.
+  `searchInContent=true` i `fullPhrase=true` **zawężają** wynik (precyzja),
+  `sort="data_desc"` przełącza na najnowsze. Zwraca top-N z sygnaturą (SYG),
+  organem, datą wydania i tezą. Zob. [Recall i precyzja](#recall-i-precyzja-jak-pytać-eurekę).
 - **`get_interpretation(id, section?, offset?, maxChars?)`** — treść
   interpretacji po `ID_INFORMACJI`. Zwraca metadane, pełną tezę i **fragment**
   treści (domyślnie 15 000 znaków) wraz z **mapą sekcji**. Treść jest
@@ -79,6 +78,60 @@ FRAGMENT` z gotowym `offset` do dalszego ciągu. Model dostaje więc informację
 > Limit istnieje z powodu budżetu tokenów: 90 tys. znaków to ok. 30 tys.
 > tokenów na jeden dokument. Stronicowanie jest świadomym kompromisem — całość
 > pozostaje dostępna, ale model pobiera ją porcjami.
+
+## Recall i precyzja: jak pytać EUREKĘ
+
+Sam dostęp do bazy nie wystarcza — liczy się, czy agent dostaje **wszystkie**
+istotne interpretacje (recall) i czy **nie dostaje nieistotnych** (precyzja).
+Wyszukiwarka EUREKI to Elasticsearch z rozmytym dopasowaniem po rdzeniach słów,
+co daje kilka pułapek. Wszystkie poniższe liczby zmierzone na żywym API
+2026-07-31 (skrypty w historii commitów):
+
+**1. Sortowanie po trafności, nie po dacie.** To była najpoważniejsza wada
+wcześniejszych wersji. Zapytanie *„50% koszty uzyskania przychodów aktor prawa
+autorskie"* (2 622 dopasowania):
+
+| Sortowanie | Czołówka wyników |
+|---|---|
+| po dacie (`data_desc`) | licencje na oprogramowanie, UPO polsko-belgijska, IP Box, WHT — **zero w temat** |
+| po trafności (**domyślne**) | *„Czy wnioskodawca ma prawo zastosować 50% koszty uzyskania przychodu?"*, honorarium autorskie, art. 22 ust. 9 pkt 3 — **wszystkie w temat** |
+
+Przy tysiącach rozmytych dopasowań sortowanie po dacie zwracało 10
+najnowszych zamiast 10 najtrafniejszych.
+
+**2. Polskie znaki są obowiązkowe.** EUREKA **nie normalizuje** diakrytyków:
+
+| Zapytanie | Trafienia |
+|---|---|
+| `podwyzszone koszty uzyskania` | **0** |
+| `podwyższone koszty uzyskania` | **293 077** |
+| `dzialalnosc badawczo-rozwojowa` | 99 |
+| `działalność badawczo-rozwojowa` | 31 729 |
+
+To najczęstsza cicha przyczyna pustego wyniku. Konektor **wykrywa** zapytania
+wyglądające na polskie bez diakrytyków i zwraca ostrzeżenie zamiast milczącego
+zera. Z tego samego powodu instrukcje dla modelu są pisane poprawną
+polszczyzną — model naśladuje język promptu, a wersja bez ogonków uczyła go
+formułować zapytania, które nie trafiają.
+
+**3. Liczba dopasowań jest zawyżona.** `aktor` daje 14 322 dopasowania, co nie
+znaczy 14 322 interpretacji o aktorach. Przy wyniku > 1000 konektor dopisuje
+modelowi ostrzeżenie, żeby nie raportował tej liczby jako liczby trafnych
+interpretacji.
+
+**4. Krótkie zapytania i kilka podejść.** 2–4 słowa kluczowe biją całe zdanie,
+a kilka wąskich zapytań bije jedno szerokie — terminologia KIS bywa inna niż
+potoczna (`honorarium autorskie` vs `50% koszty uzyskania` vs `prawa pokrewne
+artysty wykonawcy`). Zero wyników to zwykle wada zapytania, nie brak
+interpretacji.
+
+> **Pełny korpus offline.** Do zadań, gdzie liczy się wyczerpujący recall
+> (wyszukiwanie semantyczne, embeddingi, analiza linii interpretacyjnej), lepiej
+> nadaje się zrzut całej bazy niż odpytywanie wyszukiwarki:
+> [`czlonkowski/polish-tax-interpretations`](https://huggingface.co/datasets/czlonkowski/polish-tax-interpretations)
+> — 538 866 dokumentów, 2003–2026, pełne treści, CC-BY-4.0, oprac. Romuald
+> Członkowski. Ten konektor celuje w komplementarny scenariusz: **aktualne**
+> dane na żywo, z linkiem do źródła przy każdym cytacie.
 
 ## Bezpiecznik na dryf API (`api_changed`)
 

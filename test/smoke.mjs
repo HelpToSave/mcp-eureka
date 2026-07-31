@@ -71,7 +71,7 @@ async function runSmoke() {
         if (!cond) failures.push(msg);
     };
     const totalOf = (r) => {
-        const m = (r.content?.[0]?.text ?? "").match(/Znaleziono:\s+(\d+)/);
+        const m = (r.content?.[0]?.text ?? "").match(/Dopasowan wg EUREKI:\s+(\d+)/);
         return m ? parseInt(m[1], 10) : -1;
     };
 

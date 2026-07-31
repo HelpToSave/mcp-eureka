@@ -26,6 +26,7 @@ const {
     suggestDriftError,
     findSections,
     sliceContent,
+    asciiTrapHint,
     stripHtml,
     reflowText,
 } = require(join(__dirname, "..", "dist", "index.js"));
@@ -128,7 +129,7 @@ const fx = (name) =>
 {
     const raw = fx("search-angola.json");
     const text = formatSearchResults("Wynik search:", raw);
-    check(text.includes("Znaleziono: 37"), "search: totalHits");
+    check(text.includes("Dopasowan wg EUREKI: 37"), "search: totalHits");
     check(text.includes("0115-KDIT2.4011.607.2025.1.MM"), "search: sygnatura");
     check(
         text.includes("eureka.mf.gov.pl/informacje/podglad/673398"),
@@ -180,6 +181,34 @@ const fx = (name) =>
         suggestDriftError({ results: [{ foo: 1 }] }) !== null,
         "drift: suggest bez pola suggestion",
     );
+}
+
+// --- pulapka bez diakrytykow (zmierzone: 0 vs 293 tys. trafien) ------------
+{
+    check(
+        asciiTrapHint("podwyzszone koszty uzyskania") !== null,
+        "ascii trap: 'podwyzszone' ostrzega",
+    );
+    check(
+        asciiTrapHint("podwyższone koszty uzyskania") === null,
+        "ascii trap: poprawna pisownia bez ostrzezenia",
+    );
+    check(asciiTrapHint("tworca honorarium") !== null, "ascii trap: 'tworca'");
+    // Terminy, ktore po polsku NIE maja diakrytykow - zero falszywych alarmow.
+    check(asciiTrapHint("Angola") === null, "ascii trap: 'Angola' bez alarmu");
+    check(asciiTrapHint("cash pooling") === null, "ascii trap: angielski bez alarmu");
+    check(asciiTrapHint(undefined) === null, "ascii trap: brak query");
+
+    // Komunikat o zerze wynikow niesie diagnostyke, nie samo "brak".
+    const pusto = formatSearchResults("H:", { results: [], totalHits: 0 }, "tworca aktor");
+    check(pusto.includes("diakrytyczn"), "zero wynikow: podpowiedz o diakrytykach");
+    check(pusto.includes("2-4 slow"), "zero wynikow: podpowiedz o dlugosci zapytania");
+
+    // Zawyzony totalHits musi byc oflagowany dla modelu.
+    const duzo = formatSearchResults("H:", { results: [{ ID_INFORMACJI: "1", SYG: "X" }], totalHits: 14322 });
+    check(duzo.includes("ROZMYTYCH"), "zawyzony totalHits: ostrzezenie");
+    const malo = formatSearchResults("H:", { results: [{ ID_INFORMACJI: "1", SYG: "X" }], totalHits: 12 });
+    check(!malo.includes("ROZMYTYCH"), "maly totalHits: bez ostrzezenia");
 }
 
 // --- suggest: parsowanie + odsiew smieci -----------------------------------
