@@ -183,6 +183,70 @@ const fx = (name) =>
     );
 }
 
+// --- STARY format interpretacji (Izby Skarbowe, sprzed ~2021) --------------
+// Baza siega 2003 r., a redakcja zmienila sie ok. 2021. Stary format nie ma
+// "Ocena stanowiska" - organ zaczyna od "Na tle przedstawionego stanu
+// faktycznego stwierdzam" albo "W świetle obowiązującego stanu prawnego".
+{
+    const stary =
+        "INTERPRETACJA INDYWIDUALNA\n\nDyrektor Izby Skarbowej w Katowicach stwierdza, ze " +
+        "stanowisko Wnioskodawcy jest nieprawidlowe.\n\nUZASADNIENIE\n\n" +
+        "W przedmiotowym wniosku zostal przedstawiony nastepujacy stan faktyczny:\n\n" +
+        "x".repeat(500) +
+        "\n\nW związku z powyższym zadano następujące pytanie:\n\nCzy...?\n\n" +
+        "Zdaniem Wnioskodawcy, koszty...\n\n" +
+        "x".repeat(300) +
+        "\n\nNa tle przedstawionego stanu faktycznego stwierdzam, co następuje:\n\n" +
+        "Zgodnie z art. 22 ust. 9 pkt 3 ustawy...\n\n" +
+        "Stronie przysługuje prawo do wniesienia skargi...";
+    const sec = findSections(stary);
+    const keys = sec.map((s) => s.key);
+    check(keys.includes("uzasadnienie"), `stary format: wykryto uzasadnienie (${keys.join(",")})`);
+    const u = sliceContent(stary, { section: "uzasadnienie" });
+    check(
+        u.text.startsWith("Na tle przedstawionego"),
+        "stary format: skok trafia w wywod organu, nie w stan faktyczny",
+    );
+    // "UZASADNIENIE" na ~90. znaku otwiera STAN FAKTYCZNY - nie wolno go uzyc
+    // jako kotwicy sekcji 'uzasadnienie', bo skok trafialby w opis wnioskodawcy.
+    check(u.start > 800, `stary format: kotwica nie zlapala golego "UZASADNIENIE" (${u.start})`);
+
+    // Regresja: formula organu zawiera slowa "stanowisko Wnioskodawcy", przez co
+    // wzorzec sekcji 'stanowisko' zaczepial sie WEWNATRZ niej i przesuwal kursor
+    // za kotwice uzasadnienia (0115-KDIT2-3.4010.388.2017.1.PS - uzasadnienie przepadalo).
+    const pulapka =
+        "INTERPRETACJA INDYWIDUALNA\n\n" +
+        "W przedmiotowym wniosku przedstawiono następujący stan faktyczny:\n" +
+        "y".repeat(400) +
+        "\n\nW związku z powyższym zadano następujące pytanie:\nCzy...?\n\n" +
+        "y".repeat(200) +
+        "\n\nW świetle obowiązującego stanu prawnego stanowisko Wnioskodawcy " +
+        "w sprawie oceny prawnej jest nieprawidłowe.\n\nZgodnie z art. 15...";
+    const sp = findSections(pulapka);
+    const up = sliceContent(pulapka, { section: "uzasadnienie" });
+    check(
+        sp.some((s) => s.key === "uzasadnienie"),
+        "pulapka: 'stanowisko Wnioskodawcy' w formule organu nie gubi uzasadnienia",
+    );
+    check(
+        up.text.startsWith("W świetle obowiązującego"),
+        "pulapka: skok trafia w formule organu",
+    );
+    // Sekcje musza pozostac w kolejnosci dokumentu mimo zmiany algorytmu.
+    check(
+        sp.every((s, i) => i === 0 || sp[i - 1].index < s.index),
+        "pulapka: sekcje nadal w kolejnosci rosnacej",
+    );
+
+    // Nowy format nie moze sie zepsuc przy okazji poprawki dla starego.
+    const d = parseInterpretation(fx("detail-698723.json"), "698723");
+    const nowy = sliceContent(d.tresc, { section: "uzasadnienie" });
+    check(
+        nowy.text.startsWith("Ocena stanowiska"),
+        "nowy format nadal dziala po poprawce dla starego",
+    );
+}
+
 // --- pulapka bez diakrytykow (zmierzone: 0 vs 293 tys. trafien) ------------
 {
     check(

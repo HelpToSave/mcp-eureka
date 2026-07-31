@@ -643,29 +643,50 @@ export interface SectionHit {
 // Kolejnosc = kolejnosc w dokumencie. Wzorce celowo waskie, zeby nie lapac
 // tych samych slow uzytych w opisie wnioskodawcy (np. "uzasadnienie stanowiska
 // Wnioskodawcy" nie jest uzasadnieniem ORGANU).
+//
+// KAZDA sekcja ma warianty dla DWOCH formatow, bo redakcja interpretacji
+// zmienila sie ok. 2021 r., a baza siega 2003 r.:
+//   NOWY (KIS)          : "Opis stanu faktycznego" / "Pytanie" /
+//                         "Państwa stanowisko" / "Ocena stanowiska"
+//   STARY (Izby Skarbowe): "UZASADNIENIE" (otwiera STAN FAKTYCZNY!) /
+//                         "W związku z powyższym zadano" / "Zdaniem Wnioskodawcy" /
+//                         "Na tle przedstawionego stanu faktycznego stwierdzam,
+//                         co następuje" albo "W świetle obowiązującego stanu prawnego"
+//
+// UWAGA: samo "UZASADNIENIE" NIE moze byc kotwica sekcji 'uzasadnienie' - w starym
+// formacie stoi na ~790. znaku i otwiera stan faktyczny, wiec skok trafialby
+// w opis wnioskodawcy zamiast w wywod organu (odwrotnie do intencji).
 const SECTION_PATTERNS: { key: string; label: string; re: RegExp }[] = [
     {
         key: "stan_faktyczny",
         label: "Opis stanu faktycznego / zdarzenia przyszlego",
-        re: /Opis\s+(?:stanu faktycznego|zdarzenia przysz|zdarzen|stan[uw])/i,
+        re: /Opis\s+(?:stanu faktycznego|zdarzenia przysz|zdarzen|stan[uw])|W przedmiotowym wniosku (?:zosta|przedstawiono)|przedstawiono następując\w+ (?:stan faktyczny|zdarzenie)/i,
     },
-    { key: "pytanie", label: "Pytanie(-a) wnioskodawcy", re: /\bPytani[ae]\b/ },
+    {
+        key: "pytanie",
+        label: "Pytanie(-a) wnioskodawcy",
+        re: /\bPytani[ae]\b|W związku z powyższym zadano/i,
+    },
     {
         key: "stanowisko",
         label: "Stanowisko wnioskodawcy",
-        re: /(?:Państwa stanowisko|Stanowisko Wnioskodawc\w+|Pana stanowisko|Pani stanowisko)/i,
+        re: /(?:Państwa stanowisko|Stanowisko Wnioskodawc\w+|Pana stanowisko|Pani stanowisko|Zdaniem Wnioskodawc\w+)/i,
     },
     {
         key: "uzasadnienie",
         label: "Ocena stanowiska + uzasadnienie organu",
-        re: /(?:Ocena stanowiska|UZASADNIENIE interpretacji indywidualnej)/i,
+        re: /(?:Ocena stanowiska|UZASADNIENIE interpretacji indywidualnej|W świetle obowiązującego stanu prawnego|Na tle przedstawionego stanu \w+[^.]{0,40}stwierdz\w+|stwierdzam?, co następuje)/i,
     },
     {
         key: "rozstrzygniecie",
         label: "Informacja o zakresie rozstrzygniecia",
-        re: /Informacja o zakresie rozstrzygni/i,
+        re: /Informacja o zakresie rozstrzygni|Interpretacja dotyczy (?:zaistniałego|stanu faktycznego|zdarzenia)/i,
     },
-    { key: "pouczenie", label: "Pouczenie", re: /\bPouczenie\b/ },
+    {
+        key: "pouczenie",
+        label: "Pouczenie",
+        re: /\bPouczenie\b|Stronie przysługuje prawo do wniesienia skargi/i,
+    },
 ];
 
 export const SECTION_KEYS = SECTION_PATTERNS.map((s) => s.key);
@@ -678,18 +699,53 @@ export const SECTION_KEYS = SECTION_PATTERNS.map((s) => s.key);
 // otwierajaca "Pani stanowisko ... jest prawidlowe" stoi na ~80. znaku i bez
 // wymuszenia kolejnosci przechwytywala kotwice sekcji 'stanowisko'.
 // Sekcja nieznaleziona nie przesuwa kursora - brak jednej nie rozjezdza reszty.
+//
+// 'uzasadnienie' szukamy NAJPIERW i w calym tekscie, a dopiero potem sekcje
+// wczesniejsze - wylacznie w tekscie PRZED ta kotwica. Powod: formula organu
+// brzmi "W świetle obowiązującego stanu prawnego STANOWISKO WNIOSKODAWCY ...
+// jest nieprawidłowe", wiec przy czysto sekwencyjnym skanie wzorzec 'stanowisko'
+// zaczepial sie o slowa WEWNATRZ tej formuly i przesuwal kursor za kotwice
+// uzasadnienia - ktore w efekcie przepadalo (zlapane na 0115-KDIT2-3.4010.388.2017.1.PS).
+const PIVOT_KEY = "uzasadnienie";
+
 export function findSections(text: string): SectionHit[] {
+    const pivotIdx = SECTION_PATTERNS.findIndex((s) => s.key === PIVOT_KEY);
+    const pivot = SECTION_PATTERNS[pivotIdx];
+    const pm = pivot.re.exec(text);
+    const pivotAt = pm ? pm.index : -1;
+
     const out: SectionHit[] = [];
-    let cursor = 0;
-    for (const s of SECTION_PATTERNS) {
-        const m = s.re.exec(text.slice(cursor));
-        if (m && m.index >= 0) {
-            const index = cursor + m.index;
-            out.push({ key: s.key, label: s.label, index });
-            cursor = index + m[0].length;
+    const scan = (
+        patterns: typeof SECTION_PATTERNS,
+        haystack: string,
+        from: number,
+        base: number,
+    ) => {
+        let cursor = from;
+        for (const s of patterns) {
+            const m = s.re.exec(haystack.slice(cursor));
+            if (m && m.index >= 0) {
+                const local = cursor + m.index;
+                out.push({ key: s.key, label: s.label, index: base + local });
+                cursor = local + m[0].length;
+            }
         }
+        return cursor;
+    };
+
+    // Sekcje przed uzasadnieniem - ograniczone do tekstu przed kotwica organu.
+    const head = pivotAt >= 0 ? text.slice(0, pivotAt) : text;
+    scan(SECTION_PATTERNS.slice(0, pivotIdx), head, 0, 0);
+
+    if (pivotAt >= 0 && pm) {
+        out.push({ key: pivot.key, label: pivot.label, index: pivotAt });
+        const after = pivotAt + pm[0].length;
+        scan(SECTION_PATTERNS.slice(pivotIdx + 1), text, after, 0);
+    } else {
+        scan(SECTION_PATTERNS.slice(pivotIdx + 1), text, 0, 0);
     }
-    return out;
+
+    return out.sort((a, b) => a.index - b.index);
 }
 
 export interface TextView {
@@ -1045,7 +1101,7 @@ function errorResult(text: string, code: ErrorCode) {
 }
 
 const server = new Server(
-    { name: "mcp-eureka", version: "1.3.0" }, // sync z package.json "version"
+    { name: "mcp-eureka", version: "1.3.1" }, // sync z package.json "version"
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
 );
 
