@@ -125,14 +125,6 @@ potoczna (`honorarium autorskie` vs `50% koszty uzyskania` vs `prawa pokrewne
 artysty wykonawcy`). Zero wyników to zwykle wada zapytania, nie brak
 interpretacji.
 
-> **Pełny korpus offline.** Do zadań, gdzie liczy się wyczerpujący recall
-> (wyszukiwanie semantyczne, embeddingi, analiza linii interpretacyjnej), lepiej
-> nadaje się zrzut całej bazy niż odpytywanie wyszukiwarki:
-> [`czlonkowski/polish-tax-interpretations`](https://huggingface.co/datasets/czlonkowski/polish-tax-interpretations)
-> — 538 866 dokumentów, 2003–2026, pełne treści, CC-BY-4.0, oprac. Romuald
-> Członkowski. Ten konektor celuje w komplementarny scenariusz: **aktualne**
-> dane na żywo, z linkiem do źródła przy każdym cytacie.
-
 ## Bezpiecznik na dryf API (`api_changed`)
 
 API EUREKI jest nieoficjalne i może się zmienić bez zapowiedzi. Konektor
